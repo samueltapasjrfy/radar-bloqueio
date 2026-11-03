@@ -1,0 +1,12 @@
+.env
+.env.*
+data/
+extensions/
+.venv/
+__pycache__/
+*.pyc
+dist/
+*.xlsx
+*.html
+*.pdf
+avaliacao/casos/
