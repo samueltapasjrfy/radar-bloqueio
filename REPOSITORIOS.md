@@ -119,7 +119,7 @@ Repositórios **só de referência**, que não fazem parte do produto (não mexe
 |---|---|---|---|
 | EC2 `trabalhista-prod` t4g.medium | us-east-1 | 44.195.135.249 | Nginx, site, API (`trabalhista-api`), Lety (`trabalhista-lety`), **reserva** de captura/radar (`trabalhista-reserva`) |
 | RDS `trabalhista-prod` Postgres 16 | us-east-1 | privado (só a EC2) | banco |
-| EC2 `trabalhista-captura-br` t4g.small | sa-east-1 | 56.125.207.71 | captura (`trabalhista-captura`), sessões em `/opt/trabalhista/datajur-home` |
+| EC2 `trabalhista-captura-br` t4g.small | sa-east-1 | 56.125.207.71 | captura (`trabalhista-captura`), sessões em `/opt/trabalhista/datajur-home`; radar de bloqueio (`trabalhista-bloqueio`, prioridade menor), sessões e cache em `/opt/trabalhista/bloqueio-home` |
 
 - **A captura fica no Brasil** porque TRT1, TRT5 e TRT12 bloqueiam IP estrangeiro (e o DJEN também).
 - **Reserva:** se o worker do Brasil parar, o `trabalhista-reserva` (na máquina da API, com sessões
