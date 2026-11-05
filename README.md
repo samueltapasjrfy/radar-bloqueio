@@ -26,6 +26,14 @@ pela API. Leia [`REPOSITORIOS.md`](./REPOSITORIOS.md): este é 1 de 5 repositór
 As regras estão em `risco.py` e cada uma que dispara grava um motivo legível. O LLM não classifica
 risco: lê o dossiê e devolve FATOS (checklist em JSON estrito); a decisão é código.
 
+## Pagamento nos autos (sinal, não muda o grau)
+
+`resultado["pagamento_nos_autos"]` = o comprovante mais recente da ré depois da última sentença
+(`{data, doc_id, descricao, quantidade}` ou `None`): petição com anexo de comprovante/guia de depósito,
+comprovante achado no texto da peça ou pagamento com comprovante lido pela IA. Custas e taxas não contam.
+Com **corréu** no polo passivo, só vale o que se prova do cliente: assinatura de advogado do escritório,
+a peça aberta pelo cliente ("BANCO X ..., vem") ou o movimento que cita o cliente (`fatos.pagamento_nos_autos`).
+
 ## Uso
 
 ```python

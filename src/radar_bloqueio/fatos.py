@@ -139,6 +139,7 @@ class DocRef:
     titulo: str
     anexos: list[str] = field(default_factory=list)  # "tipo (titulo)" dos anexos
     link_id: str = ""
+    movs: str = ""   # movimentos do evento em que a peça foi juntada (podem dizer quem peticionou)
 
     def linha(self) -> str:
         a = f" | anexos: {'; '.join(self.anexos)}" if self.anexos else ""
@@ -182,6 +183,7 @@ class Fatos:
     impugnacoes_reu: list[DocRef] = field(default_factory=list)
 
     atividade_apos_extincao: bool = False  # processo relacionado/incidente se moveu depois
+    outros_reus: int = 0  # corréus no polo passivo (além do cliente): petição do polo passivo pode não ser dele
     cs_apenso_ativo: date | None = None  # último movimento relevante do cumprimento em autos apartados
 
     @property
@@ -245,7 +247,8 @@ class Fatos:
 
 def _docref(ev: Evento, doc: Documento, anexos: list[Documento]) -> DocRef:
     return DocRef(ev.data, ev.polo, doc.doc_id, doc.tipo, doc.titulo,
-                  [f"{a.tipo} ({a.titulo})" if a.titulo else a.tipo for a in anexos], doc.link_id)
+                  [f"{a.tipo} ({a.titulo})" if a.titulo else a.tipo for a in anexos], doc.link_id,
+                  " / ".join(ev.movimentos))
 
 
 def _data_br(s: str) -> date:
@@ -267,6 +270,7 @@ def extrair(capa: Capa, eventos: list[Evento]) -> Fatos:
     p = perfil.atual()
     f = Fatos(juizado=capa.juizado, classe=capa.classe,
               advogado_habilitado=p.advogado_no_texto(" ".join(capa.polo_passivo)) if p.advogados else None)
+    f.outros_reus = len([x for x in capa.polo_passivo if not p.eh_cliente(x) and not RE_NAO_PARTE.search(norm(x))])
     re_decorrido = re_decorrido_cliente()
     re_honor_cliente = re_honor_perito_cliente()
     vistos: set[str] = set()
@@ -495,3 +499,98 @@ def aplicar_sinais(f: Fatos, d: DocRef, texto: str) -> list[str]:
     if d.polo == "ATIVO" and any(x.startswith("pede cumprimento") for x in sinais):
         f.cs_inicio.append((d.data, f"petição do autor #{d.doc_id} pede cumprimento de sentença"))
     return sinais
+
+
+# --- pagamento nos autos (sinal para o produto, não muda o grau) ----------------------
+# Petição da ré com comprovante/guia de depósito juntado, ou comprovante achado no texto da peça.
+# Custas, taxas e preparo não contam (não pagam a condenação).
+RE_PAGTO_FORTE = re.compile(r"comprovante|deposito|pagamento|pasta\d+valor|boleto|transferencia|\bted\b|recibo|"
+                            r"guia (de )?(deposito|judicial|recolhimento judicial)")
+RE_NAO_E_CONDENACAO = re.compile(r"idcusta|custa|dare|gnre|taxa|preparo|porte de remessa|diligencia|emolumento")
+# linhas do polo passivo que não são parte (advogado, procuradoria do próprio réu, perito...)
+RE_NAO_PARTE = re.compile(r"advogad|procurador|perit|curador|ministerio publico|defensor|testemunh|terceiro interessado")
+RE_CONTRA = re.compile(r"contra|em face|desfavor|movid|promovid|ajuizad")
+
+
+def autoria_do_cliente(texto: str | None) -> bool | None:
+    """A peça é do cliente? True: assinada por advogado do escritório (nome/OAB) ou o cliente abre a peça
+    ("BANCO X ..., vem"). False: outra parte abre a peça. None: o texto não diz."""
+    if not texto or texto.startswith("[falha"):
+        return None
+    p = perfil.atual()
+    t = norm(texto)
+    if p.advogados and (re.search(p.regex_advogados, t[:3000]) or re.search(p.regex_advogados, t[-3000:])):
+        return True
+    v = re.search(r"\bvem\b|\bvem,", t[:6000])
+    if not v:
+        return None
+    antes = t[max(0, v.start() - 500):v.start()]
+    nomes = list(re.finditer(p.regex_nomes, antes))
+    if nomes and not RE_CONTRA.search(antes[max(0, nomes[-1].start() - 80):nomes[-1].start()]):
+        return True
+    return False
+
+
+def _pagamento_do_cliente(d: DocRef | None, textos: dict[str, str] | None, outros_reus: int) -> bool:
+    """Pagamento do polo passivo é do NOSSO réu? Sem corréu, sim. Com corréu, só com prova: o movimento
+    cita o cliente ou o texto da peça é dele (assinatura do escritório ou abertura)."""
+    if outros_reus == 0:
+        return True
+    if d is None:
+        return False
+    if d.movs and perfil.atual().eh_cliente(d.movs):
+        return True
+    return autoria_do_cliente((textos or {}).get(d.doc_id)) is True
+
+
+CAMPOS_PAGAMENTO = ("houve_pagamento", "comprovacao_pagamento", "data_pagamento", "valor_pago")
+
+
+def _pagamento_da_ia(checklist: dict | None) -> tuple[date, str, str] | None:
+    """Pagamento que a IA leu nos autos com comprovante (petição + comprovante ou só o comprovante)."""
+    c = checklist or {}
+    if c.get("houve_pagamento") not in ("parcial", "integral") or \
+            c.get("comprovacao_pagamento") not in ("peticao_com_comprovante", "so_comprovante_sem_peticao"):
+        return None
+    try:
+        data = date.fromisoformat(str(c.get("data_pagamento") or "")[:10])
+    except ValueError:
+        return None
+    ev = next((e for e in c.get("evidencias") or [] if e.get("campo") in CAMPOS_PAGAMENTO and e.get("doc_id")), {})
+    valor = c.get("valor_pago")
+    brl = f" de R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if isinstance(valor, (int, float)) else ""
+    desc = f"Pagamento {'integral' if c['houve_pagamento'] == 'integral' else 'parcial'}{brl} com comprovante nos autos"
+    return data, str(ev.get("doc_id") or "").lstrip("#"), desc
+
+
+def pagamento_nos_autos(f: Fatos, checklist: dict | None = None, textos: dict[str, str] | None = None) -> dict | None:
+    """O comprovante de pagamento mais recente juntado pela ré depois da última sentença (ou em qualquer
+    data, se não há sentença): {"data", "doc_id", "descricao", "quantidade"}. Fontes: petição da ré com
+    anexo de pagamento, comprovante achado no texto da peça e a leitura da IA (pagamento com comprovante).
+    Só sinaliza: o grau segue as regras (pagamento parcial, sem apólice, autor que discorda continuam pesando).
+    Com corréus no processo, só conta o comprovante que se prova do cliente (`_pagamento_do_cliente`)."""
+    ref = f.data_ultima_sentenca
+    por_id = {d.doc_id: d for d in f.peticoes_reu}
+    cands: dict[str, tuple[date, str]] = {}
+    for d in f.pagamentos_reu:
+        tudo = norm(f"{d.tipo} {d.titulo} " + " ".join(d.anexos))
+        if (ref and d.data < ref) or RE_NAO_E_CONDENACAO.search(tudo) or not RE_PAGTO_FORTE.search(tudo) \
+                or not _pagamento_do_cliente(d, textos, f.outros_reus):
+            continue
+        anexos = [a for a in d.anexos if RE_PAGTO_FORTE.search(norm(a))][:2]
+        desc = f"{d.tipo}" + (f" com {', '.join(anexos)}" if anexos else "")
+        cands[d.doc_id] = (d.data, desc)
+    for data, doc_id in f.sinal_pagamento_reu:
+        if (ref and data < ref) or doc_id in cands or not _pagamento_do_cliente(por_id.get(doc_id), textos, f.outros_reus):
+            continue
+        cands[doc_id] = (data, "Petição da ré com comprovante de pagamento/depósito (lido no texto)")
+    ia = _pagamento_da_ia(checklist)
+    if ia and f.outros_reus and not _pagamento_do_cliente(por_id.get(ia[1]), textos, f.outros_reus):
+        ia = None  # com corréu, a IA pode ter lido o pagamento de outro réu: só com a peça provada
+    if ia and not (ref and ia[0] < ref) and ia[1] not in cands:
+        cands[ia[1] or f"ia:{ia[0].isoformat()}"] = (ia[0], ia[2])
+    if not cands:
+        return None
+    doc_id, (data, desc) = max(cands.items(), key=lambda x: (x[1][0], x[0]))
+    return {"data": data.isoformat(), "doc_id": "" if doc_id.startswith("ia:") else doc_id,
+            "descricao": desc[:240], "quantidade": len(cands)}

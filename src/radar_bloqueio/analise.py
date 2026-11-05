@@ -12,7 +12,7 @@ from datetime import date, timedelta
 from . import cnj as cnjmod
 from . import perfil
 from .cache import CacheDocs
-from .fatos import DocRef, Fatos, aplicar_sinais, extrair, norm
+from .fatos import DocRef, Fatos, aplicar_sinais, extrair, norm, pagamento_nos_autos
 from .llm import AnalisadorLLM
 from .pje_http import Autos, PjeHttp, ProcessoNaoEncontrado
 from .risco import categoria, classificar, etapa
@@ -401,7 +401,14 @@ def analisar_processo(numero_txt: str, cli: PjeHttp, cache: CacheDocs, llm: Anal
             if doc.anexo_de:
                 anexos_de.setdefault(doc.anexo_de, []).append(doc)
 
+    textos_lidos: dict[str, str] = {}
+
     def obter(doc_id: str, link_id: str, tipo: str, titulo: str) -> tuple[str, str]:
+        texto, juntado = _obter(doc_id, link_id, tipo, titulo)
+        textos_lidos[doc_id] = texto
+        return texto, juntado
+
+    def _obter(doc_id: str, link_id: str, tipo: str, titulo: str) -> tuple[str, str]:
         c_doc, a_doc = docs_de.get(doc_id, (cli, autos))
         sistema_doc = a_doc.sistema if a_doc is not autos else sistema_principal
         c = cache.obter(sistema_doc, doc_id)
@@ -472,6 +479,7 @@ def analisar_processo(numero_txt: str, cli: PjeHttp, cache: CacheDocs, llm: Anal
         "conclusao": risco.conclusao, "motivos": risco.motivos, "acao_sugerida": risco.acao_sugerida,
         "etapa": etapa(risco), "categoria": categoria(risco),
         "bloqueio_realizado": risco.ha_risco == "BLOQUEIO JÁ REALIZADO",
+        "pagamento_nos_autos": pagamento_nos_autos(f, risco.checklist, textos_lidos),
         "checklist": risco.checklist, "checklist_llm": checklist,
         "fatos": {"resumo": f.resumo(), "juizado": f.juizado, "advogado_habilitado": f.advogado_habilitado,
                   "vinculos": vinculos, "apensos": apensos,

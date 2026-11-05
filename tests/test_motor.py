@@ -145,3 +145,61 @@ def test_cache_por_sistema(tmp_path):
     assert c.obter("pje_ba", "123")["texto"] == "ab"
     assert c.obter("eproc_rj", "123") is None  # o mesmo id em outro sistema é outro documento
     assert c.varios("pje_ba", ["123", "9"]).keys() == {"123"}
+
+
+def test_pagamento_nos_autos_sinaliza_sem_mudar_o_grau():
+    from radar_bloqueio.fatos import pagamento_nos_autos
+    sentenca = _evento(3, date(2025, 1, 10), "INTERNO", ["Julgado procedente o pedido"], [("11", "Sentença")])
+    custas = Evento(seq=2, data=date(2025, 3, 2), hora="", polo="PASSIVO", movimentos=["Juntada de Petição"],
+                    documentos=[Documento("20", "Petição", "", ""), Documento("21", "Guia", "custas DARE", "", anexo_de="20")])
+    pagto = Evento(seq=1, data=date(2025, 4, 2), hora="", polo="PASSIVO", movimentos=["Juntada de Petição"],
+                   documentos=[Documento("30", "Petição", "informa pagamento", ""),
+                               Documento("31", "Documento de Comprovação", "comprovante de depósito judicial", "",
+                                         anexo_de="30")])
+    antigo = Evento(seq=4, data=date(2024, 5, 2), hora="", polo="PASSIVO", movimentos=["Juntada"],
+                    documentos=[Documento("40", "Petição", "", ""), Documento("41", "Comprovante", "pagamento", "",
+                                                                             anexo_de="40")])
+    with perfil.usar(BMG):
+        f = extrair(Capa(classe="Procedimento Comum"), [pagto, custas, sentenca, antigo])
+        p = pagamento_nos_autos(f)
+        assert p and p["doc_id"] == "30" and p["data"] == "2025-04-02" and p["quantidade"] == 1
+        assert "comprovante de depósito" in p["descricao"]
+        f2 = extrair(Capa(), [custas, sentenca])
+        assert pagamento_nos_autos(f2) is None  # custas não pagam a condenação
+
+
+def test_pagamento_lido_pela_ia_entra_e_peticao_sem_comprovante_nao():
+    from radar_bloqueio.fatos import pagamento_nos_autos
+    sentenca = _evento(0, date(2025, 1, 10), "INTERNO", ["Julgado procedente o pedido"], [("11", "Sentença")])
+    with perfil.usar(BMG):
+        f = extrair(Capa(), [sentenca])
+        chk = {"houve_pagamento": "integral", "comprovacao_pagamento": "peticao_com_comprovante",
+               "data_pagamento": "2025-05-03", "valor_pago": 1234.5,
+               "evidencias": [{"campo": "houve_pagamento", "doc_id": "#77", "data": "2025-05-03", "trecho": "x"}]}
+        p = pagamento_nos_autos(f, chk)
+        assert p == {"data": "2025-05-03", "doc_id": "77", "quantidade": 1,
+                     "descricao": "Pagamento integral de R$ 1.234,50 com comprovante nos autos"}
+        assert pagamento_nos_autos(f, {**chk, "comprovacao_pagamento": "so_peticao_sem_comprovante"}) is None
+
+
+def test_pagamento_de_correu_nao_conta():
+    from radar_bloqueio.fatos import pagamento_nos_autos
+    sentenca = _evento(2, date(2025, 1, 10), "INTERNO", ["Julgado procedente o pedido"], [("11", "Sentença")])
+    pagto = Evento(seq=1, data=date(2025, 4, 2), hora="", polo="PASSIVO", movimentos=["Juntada de Petição"],
+                   documentos=[Documento("30", "Petição", "informa pagamento", ""),
+                               Documento("31", "Comprovante", "comprovante de depósito judicial", "", anexo_de="30")])
+    capa = Capa(polo_passivo=["BANCO BMG S.A. (RÉU)", "BANCO DO BRASIL SA - CNPJ 00.000.000/0001-91 (RÉU/RÉ)",
+                              "FULANO - OAB MG1 (ADVOGADO)"])
+    outro = "BANCO DO BRASIL S.A., já qualificado, vem, por seus advogados, informar o depósito..."
+    nosso = "BANCO BMG S.A., já qualificado nos autos, vem informar o pagamento... Ricardo Lopes Godoy OAB/MG 77.167"
+    with perfil.usar(BMG):
+        f = extrair(capa, [pagto, sentenca])
+        assert f.outros_reus == 1
+        assert pagamento_nos_autos(f, None, {"30": outro}) is None      # é do corréu
+        assert pagamento_nos_autos(f, None, {}) is None                 # sem prova de quem pagou
+        assert pagamento_nos_autos(f, None, {"30": nosso})["doc_id"] == "30"
+        chk = {"houve_pagamento": "integral", "comprovacao_pagamento": "peticao_com_comprovante",
+               "data_pagamento": "2025-04-02", "evidencias": [{"campo": "houve_pagamento", "doc_id": "30"}]}
+        assert pagamento_nos_autos(f, chk, {"30": outro}) is None       # a IA leu o pagamento do corréu
+        so_nosso = extrair(Capa(polo_passivo=["BANCO BMG S.A. (RÉU)"]), [pagto, sentenca])
+        assert so_nosso.outros_reus == 0 and pagamento_nos_autos(so_nosso, None, {})["doc_id"] == "30"
