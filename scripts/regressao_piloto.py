@@ -53,9 +53,12 @@ def montar(mod, capa_json: dict, linhas) -> tuple:
     return capa, eventos
 
 
-def classificar(a_mod, f_mod, r_mod, t_mod, capa_json, linhas, checklist, hoje, textos):
+def classificar(a_mod, f_mod, r_mod, t_mod, capa_json, linhas, checklist, hoje, textos, sistema=""):
     capa, eventos = montar(t_mod, capa_json, linhas)
     f = f_mod.extrair(capa, eventos)
+    # como na análise ao vivo: grupo juntado ou processo no eproc = a migração já está na timeline
+    if "+" in (sistema or "") or any(x.startswith("eproc") for x in (sistema or "").split("+")):
+        f.migracoes = []
     for d, *_ in a_mod.selecionar(f, eventos):
         f_mod.aplicar_sinais(f, d, textos.get(d.doc_id, ""))
     return r_mod.classificar(checklist, f, hoje)
@@ -67,13 +70,13 @@ def main() -> int:
     args = ap.parse_args()
     conn = psycopg.connect(os.getenv("PG_DSN", "postgresql:///bmg_block"))
     sql = """SELECT DISTINCT ON (a.cnj) a.cnj, a.data_analise, coalesce(a.checklist_llm, a.checklist), a.grau_risco,
-                    p.capa
+                    p.capa, a.sistema
                FROM analises a JOIN processos p USING (cnj)
               WHERE a.erro IS NULL AND coalesce(a.checklist_llm, a.checklist) IS NOT NULL
               ORDER BY a.cnj, a.criado_em DESC"""
     linhas = conn.execute(sql).fetchall()[: args.limite or None]
     iguais, difs, erros = 0, [], collections.Counter()
-    for cnj, dia, chk, _grau_gravado, capa_json in linhas:
+    for cnj, dia, chk, _grau_gravado, capa_json, sistema in linhas:
         chk = chk if isinstance(chk, dict) else json.loads(chk)
         capa_json = capa_json if isinstance(capa_json, dict) else json.loads(capa_json or "{}")
         evs = conn.execute("SELECT seq, data, hora, polo, movimentos, documentos FROM eventos WHERE cnj=%s ORDER BY seq",
@@ -85,9 +88,9 @@ def main() -> int:
         textos = dict(conn.execute("SELECT doc_id, texto FROM documentos WHERE doc_id = ANY(%s)", (ids,)).fetchall())
         hoje = dia or date.today()
         try:
-            velho = classificar(a_old, f_old, r_old, t_old, capa_json, evs, chk, hoje, textos)
+            velho = classificar(a_old, f_old, r_old, t_old, capa_json, evs, chk, hoje, textos, sistema)
             with perfil.usar(BMG):
-                novo = classificar(a_new, f_new, r_new, t_new, capa_json, evs, checklist_novo(chk), hoje, textos)
+                novo = classificar(a_new, f_new, r_new, t_new, capa_json, evs, checklist_novo(chk), hoje, textos, sistema)
         except Exception as e:  # noqa: BLE001
             erros[f"{type(e).__name__}: {str(e)[:80]}"] += 1
             continue
