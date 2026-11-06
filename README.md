@@ -22,6 +22,13 @@ pela API. Leia [`REPOSITORIOS.md`](./REPOSITORIOS.md): este é 1 de 5 repositór
 | Pagou o incontroverso **sem apólice** | **alto** | **alto** |
 | Autor concorda, alvará expedido, execução extinta | sem risco | idem |
 | Advogado do escritório fora do polo passivo na fase de CS | sobe um grau (intimações podem não chegar) | idem |
+| Bloqueio feito e ainda em vigor | **bloqueio já realizado** | idem |
+| Bloqueio feito e depois resolvido: execução extinta, alvará + arquivamento, ou desbloqueio total + alvará/pagamento/arquivamento, sem novo pedido depois | **sem risco** ("bloqueio encerrado") | idem |
+| Desbloqueio total sem nada disso (conta de terceiro, exceção acolhida...) | regras gerais (a dívida pode continuar) | idem |
+
+Desbloqueio **parcial** (excesso, irrisório, "transfere X e desbloqueia o remanescente") e **pedido** de
+desbloqueio não desfazem o bloqueio. A data de um desbloqueio nunca é usada como data do bloqueio
+(`fatos.tipo_desbloqueio`, `risco._bloqueio_vigente`).
 
 As regras estão em `risco.py` e cada uma que dispara grava um motivo legível. O LLM não classifica
 risco: lê o dossiê e devolve FATOS (checklist em JSON estrito); a decisão é código.
@@ -62,7 +69,10 @@ uv run --group dev pytest -q
 
 - **Regressão contra o piloto** (`scripts/regressao_piloto.py`): reclassifica as 3.112 análises
   gravadas no Postgres do piloto com as regras do piloto e as deste pacote, sobre o mesmo checklist:
-  **3.112/3.112 iguais** (grau, situação, fase e nº de motivos) em 03/11/2026.
+  **3.112/3.112 iguais** (grau, situação, fase e nº de motivos) em 03/11/2026. Em 06/11/2026, com o
+  bloqueio encerrado/desfeito, **3.163/3.280**: as 117 diferenças são todas "bloqueio já realizado" de
+  propósito (107 → sem risco, 5 → alto/médio pelas regras gerais, 5 só com motivo a mais).
+  `--todas` lista cada uma.
 - Piloto (equipe jurídica): MG 12/16 iguais, SP 15/17; as divergências são o robô mais conservador.
 - Custo: ~US$ 0,004 por processo (gpt-4.1-mini, ~9 mil tokens de entrada); ~20–30 s por processo.
 

@@ -67,6 +67,7 @@ def classificar(a_mod, f_mod, r_mod, t_mod, capa_json, linhas, checklist, hoje, 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limite", type=int)
+    ap.add_argument("--todas", action="store_true", help="lista todas as diferenças (padrão: 15)")
     args = ap.parse_args()
     conn = psycopg.connect(os.getenv("PG_DSN", "postgresql:///bmg_block"))
     sql = """SELECT DISTINCT ON (a.cnj) a.cnj, a.data_analise, coalesce(a.checklist_llm, a.checklist), a.grau_risco,
@@ -102,7 +103,9 @@ def main() -> int:
                          (novo.grau, novo.ha_risco, novo.fase, len(novo.motivos)), velho.motivos, novo.motivos))
     total = iguais + len(difs)
     print(f"{iguais}/{total} iguais (grau, situação, fase e nº de motivos); {len(difs)} diferentes; erros {dict(erros)}")
-    for cnj, v, n, mv, mn in difs[:15]:
+    for (gv, sv, gn, sn), q in collections.Counter((v[0], v[1], n[0], n[1]) for _, v, n, _, _ in difs).most_common():
+        print(f"  {q:5d}  {gv} / {sv}  ->  {gn} / {sn}")
+    for cnj, v, n, mv, mn in (difs if args.todas else difs[:15]):
         print(f"\n{cnj}\n  piloto: {v}\n  novo:   {n}")
         for x in sorted(set(mv) ^ set(mn))[:6]:
             print(f"    {'-' if x in mv else '+'} {x[:180]}")

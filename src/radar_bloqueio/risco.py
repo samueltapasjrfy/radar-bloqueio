@@ -148,6 +148,8 @@ def _normalizar(r: dict, f: Fatos) -> dict:
         r["bloqueio_realizado"] = True
         r["data_bloqueio"] = r.get("data_bloqueio") or d0.isoformat()
         r.setdefault("_ajustes", []).append(f"bloqueio comprovado por pedido/decisão de desbloqueio em {d0:%d/%m/%Y}")
+    if r["bloqueio_realizado"]:
+        _bloqueio_vigente(r, f)
     # CS só com evidência verificada (regra, sinal no texto ou classe processual)
     sent = f.data_ultima_sentenca
     intim_pos = [d for d in f.sinais_intimacao_pagar if sent is None or d > sent]
@@ -184,6 +186,69 @@ def _normalizar(r: dict, f: Fatos) -> dict:
             r["impugnacao_embargos"] = ("julgada_favor_reu" if "acolhid" in m and "parte" not in m
                                         else "julgada_parcial" if "parte" in m else "julgada_contra_reu")
     return r
+
+
+def _bloqueio_vigente(r: dict, f: Fatos) -> None:
+    """O bloqueio já feito ainda vale hoje? Depois do último bloqueio, (a) sentença que extinguiu a execução,
+    (b) alvará e arquivamento definitivo ou (c) desbloqueio total com alvará, pagamento ou arquivamento
+    encerram o bloqueio (r["_bloqueio_encerrado"] = o porquê). Desbloqueio total sem nada disso: o bloqueio
+    deixou de existir e o risco segue as regras gerais (a dívida pode continuar). Ordem de bloqueio, intimação
+    para pagar, pedido de penhora ou novo cumprimento depois do encerramento reabrem o risco."""
+    liberacoes = sorted(d for d, _ in f.liberacoes)
+    db = _d(r.get("data_bloqueio"))
+    # a data lida pode ser a do desbloqueio (certidão "comprovante de desbloqueio"): o bloqueio foi antes
+    if db and db in liberacoes and not any(d == db for d, _ in f.bloqueios):
+        antes = [d for d, _ in f.bloqueios + f.ordens_bloqueio if d < db]
+        r["data_bloqueio"] = max(antes).isoformat() if antes else None
+        r.setdefault("_ajustes", []).append(
+            f"{db:%d/%m/%Y} é a data do desbloqueio, não a do bloqueio"
+            + (f" (último ato de bloqueio antes dele: {max(antes):%d/%m/%Y})" if antes else ""))
+        # sem ato de bloqueio datado antes: o bloqueio foi em algum dia antes do desbloqueio
+        db_lido, db = db, _d(r["data_bloqueio"])
+        if db is None:
+            db_lido -= timedelta(days=1)
+    else:
+        db_lido = db
+    ult = max([d for d, _ in f.bloqueios] + ([db_lido] if db_lido else []), default=None)
+    if ult is None:
+        return
+
+    def depois(lista):
+        return sorted(d for d, *_ in lista if d >= ult)
+
+    ext, arq, alv, lib = depois(f.extincoes_execucao), depois(f.extincoes), depois(f.alvaras), [d for d in liberacoes if d >= ult]
+    pago = depois([(p.data,) for p in f.pagamentos_reu])
+    autor_pos_arq = arq and any(p.data > arq[-1] for p in f.peticoes_autor)
+    porque = []
+    if ext:
+        porque.append(f"sentença extinguiu a execução em {ext[-1]:%d/%m/%Y}")
+    if alv and arq and not autor_pos_arq and not f.atividade_apos_extincao:
+        porque.append(f"alvará em {alv[0]:%d/%m/%Y} e arquivamento em {arq[-1]:%d/%m/%Y}")
+    if lib and (alv or pago or (arq and not autor_pos_arq and not f.atividade_apos_extincao)):
+        extra = ([f"alvará em {alv[-1]:%d/%m/%Y}"] if alv else []) + ([f"pagamento da ré em {pago[-1]:%d/%m/%Y}"] if pago else []) \
+            + ([f"arquivamento em {arq[-1]:%d/%m/%Y}"] if arq and not alv else [])
+        porque.append(f"desbloqueio em {lib[-1]:%d/%m/%Y} ({', '.join(extra)})")
+    fim = max(ext + alv + arq + lib + pago, default=None)
+    reabriu = []
+    if fim:
+        reabriu = [f"ordem de bloqueio em {d:%d/%m/%Y}" for d, _ in f.ordens_bloqueio if d > fim] + \
+                  [f"intimação para pagar em {d:%d/%m/%Y}" for d in f.sinais_intimacao_pagar if d > fim] + \
+                  [f"cumprimento iniciado em {d:%d/%m/%Y}" for d, _ in f.cs_inicio if d > fim]
+        dpb = _d(r.get("data_pedido_bloqueio"))
+        if dpb and dpb > fim:
+            reabriu.append(f"pedido de penhora em {dpb:%d/%m/%Y}")
+    if porque and not reabriu:
+        r["_bloqueio_encerrado"] = (f"Houve bloqueio{f' em {db:%d/%m/%Y}' if db else ''}, mas ele já foi resolvido: "
+                                    + "; ".join(porque) + ". Não há bloqueio em vigor nem novo pedido depois.")
+    elif lib and not reabriu:
+        r["bloqueio_realizado"] = False
+        if not any(d > ult for d, _ in f.ordens_bloqueio):
+            r["ordem_bloqueio_deferida"] = False  # a ordem já foi cumprida (e desfeita)
+        r.setdefault("_ajustes", []).append(
+            f"bloqueio{f' de {db:%d/%m/%Y}' if db else ''} desfeito: desbloqueio total em {lib[-1]:%d/%m/%Y}; "
+            "o risco segue as regras gerais")
+    elif reabriu:
+        r.setdefault("_ajustes", []).append("bloqueio anterior resolvido, mas a execução continuou: " + "; ".join(list(dict.fromkeys(reabriu))[:3]))
 
 
 def classificar(r: dict, f: Fatos, hoje: date) -> Risco:
@@ -227,6 +292,10 @@ def _classificar(r: dict, f: Fatos, hoje: date) -> Risco:
         fase = "AG INÍCIO CS/PROC COMUM"
 
     # ----------------------------------------------- bloqueio já realizado
+    if r["bloqueio_realizado"] and r.get("_bloqueio_encerrado"):
+        return Risco("SEM RISCO", "NÃO - SEM RISCO DE BLOQUEIO", "SEM PENDENCIA/INDICADO ENCERRAMENTO",
+                     "BLOQUEIO ENCERRADO", motivos + [r["_bloqueio_encerrado"]],
+                     "Nenhuma providência de bloqueio: conferir o arquivamento/levantamento.")
     if r["bloqueio_realizado"]:
         db = _d(r.get("data_bloqueio"))
         motivos.append(f"Bloqueio/penhora on-line já efetivado{f' em {db:%d/%m/%Y}' if db else ''}.")

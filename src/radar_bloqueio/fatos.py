@@ -65,7 +65,25 @@ RE_ENVIO_CENTRAL_SISBAJUD = re.compile(r"penhora on ?-?line - central sisbajud")
 RE_BLOQUEIO_FEITO = re.compile(
     r"(realizad[oa]|efetivad[oa]|positiv[oa]|cumprid[oa]).{0,40}(bloqueio|penhora|sisbajud|bacenjud)"
     r"|(bloqueio|penhora|sisbajud|bacenjud).{0,40}(realizad[oa]|efetivad[oa]|positiv[oa]|parcial|total)"
-    r"|transferencia de valores|desbloqueio|penhora (on-?line|realizada)|juntada de (resultado|detalhamento).{0,30}(sisbajud|bacenjud)")
+    r"|transferencia de valores|penhora (on-?line|realizada)|juntada de (resultado|detalhamento).{0,30}(sisbajud|bacenjud)")
+# desbloqueio: pedido (da parte, ainda não feito), parcial (só o excesso/irrisório, ou transfere uma parte e
+# libera o resto: a penhora segue) ou total (o valor bloqueado voltou à ré: o bloqueio deixou de existir)
+RE_DESBLOQ_PEDIDO = re.compile(r"pedido de desbloqueio|requer\w* (o |a )?desbloqueio|pede (o )?desbloqueio|"
+                               r"pleiteia (o )?desbloqueio|solicita (o )?desbloqueio")
+RE_DESBLOQ_PARCIAL = re.compile(r"excesso|excedente|exceder|parcial|remanescente|irrisori|inferior|transfer|"
+                                r"ultrapass|superior ao|caso (o total|a soma)")
+RE_DESBLOQ = re.compile(r"desbloq")
+
+
+def tipo_desbloqueio(texto_norm: str) -> str | None:
+    """'pedido' | 'parcial' | 'total' para um movimento/documento que fala de desbloqueio; None se não fala."""
+    if not RE_DESBLOQ.search(texto_norm):
+        return None
+    if RE_DESBLOQ_PEDIDO.search(texto_norm):
+        return "pedido"
+    if RE_DESBLOQ_PARCIAL.search(texto_norm):
+        return "parcial"
+    return "total"
 RE_BLOQUEIO_DOC = re.compile(r"sisbajud|bacenjud|bloqueio|detalhamento de ordem|penhora")
 RE_ALVARA = re.compile(r"alvara|levantamento|transferencia eletronica")
 RE_EXTINCAO = re.compile(r"extinta a execucao|extinto o cumprimento|arquivado definitivamente|"
@@ -173,6 +191,8 @@ class Fatos:
     baixas_recurso: list[tuple[date, str]] = field(default_factory=list)
     pericias_calculo: list[tuple[date, str]] = field(default_factory=list)
     desbloqueios: list[tuple[date, str]] = field(default_factory=list)
+    # desbloqueio TOTAL feito pelo juízo (o valor voltou à ré): o bloqueio anterior deixou de valer
+    liberacoes: list[tuple[date, str]] = field(default_factory=list)
     sinal_pagamento_reu: list[tuple[date, str]] = field(default_factory=list)  # do texto integral
     impug_julgadas: list[tuple[date, str]] = field(default_factory=list)
     peticoes_reu: list[DocRef] = field(default_factory=list)
@@ -215,6 +235,8 @@ class Fatos:
             f.append(f"RETORNO/BAIXA DO RECURSO (recurso já julgado): {d:%d/%m/%Y} — {m}")
         for d, m in self.desbloqueios[:3]:
             f.append(f"DESBLOQUEIO PEDIDO/DEFERIDO (prova que houve bloqueio): {d:%d/%m/%Y} — {m[:200]}")
+        for d, m in self.liberacoes[:3]:
+            f.append(f"DESBLOQUEIO FEITO (valor devolvido à ré; a data NÃO é a do bloqueio): {d:%d/%m/%Y} — {m[:200]}")
         for d, m in self.pericias_calculo[:2]:
             f.append(f"PERÍCIA/CONTADORIA PARA APURAR VALOR: {d:%d/%m/%Y} — {m[:200]}")
         for d, m in self.ordens_bloqueio:
@@ -298,8 +320,11 @@ def extrair(capa: Capa, eventos: list[Evento]) -> Fatos:
                     f.cs_inicio.append((ev.data, original))
             if t := re_decorrido.search(m):
                 f.decorridos_reu.append(_data_br(t.groups()[-1]))
+            tipo_desb = tipo_desbloqueio(m)
+            if tipo_desb == "total":
+                f.liberacoes.append((ev.data, original))
             if RE_BLOQUEIO_FEITO.search(m) and "sob pena" not in m and "intime-se" not in m \
-                    and not RE_ENVIO_CENTRAL_SISBAJUD.search(m):
+                    and not RE_ENVIO_CENTRAL_SISBAJUD.search(m) and not tipo_desb:
                 f.bloqueios.append((ev.data, original))
             if RE_ALVARA.search(m):
                 f.alvaras.append((ev.data, original))
@@ -337,8 +362,11 @@ def extrair(capa: Capa, eventos: list[Evento]) -> Fatos:
                 f.certidoes_transito.append(ref)
             if tipo in ("decisao", "despacho", "decisao interlocutoria"):
                 f.decisoes.append(ref)
+            tipo_desb = tipo_desbloqueio(norm(f"{doc.tipo} {doc.titulo}"))
+            if tipo_desb == "total" and ev.polo in ("INTERNO", "SISTEMA"):
+                f.liberacoes.append((ev.data, f"documento #{doc.doc_id} {doc.tipo} ({doc.titulo})"))
             if RE_BLOQUEIO_DOC.search(tudo) and ev.polo in ("INTERNO", "SISTEMA") \
-                    and not RE_ENVIO_CENTRAL_SISBAJUD.search(tudo):
+                    and not RE_ENVIO_CENTRAL_SISBAJUD.search(tudo) and not tipo_desb:
                 f.bloqueios.append((ev.data, f"documento #{doc.doc_id} {doc.tipo} ({doc.titulo})"))
             if "cumprimento de sentenca" in tudo and ev.polo == "ATIVO":
                 f.cs_inicio.append((ev.data, f"petição do autor #{doc.doc_id} {doc.tipo} ({doc.titulo})"))

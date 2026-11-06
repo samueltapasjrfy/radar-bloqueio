@@ -131,6 +131,74 @@ def test_bloqueio_realizado():
     assert categoria(r) == "BLOQUEIO_REALIZADO"
 
 
+# caso real (TJGO, 5742872-14.2025.8.09.0029): SISBAJUD em 20/10, a ré deposita em 30/10, certidão de
+# desbloqueio em 03/11, alvará ao autor e "arquive-se" em 04/11. O motor mostrava "bloqueio em 03/11".
+EVENTOS_GO = [
+    _evento(0, date(2026, 11, 5), "INTERNO", ["Mov. 132 - Alvará Expedido - Caixa Econômica Federal"],
+            [("132", "Alvará Expedido")]),
+    _evento(1, date(2026, 11, 4), "INTERNO", ["Mov. 131 - Despacho -> Mero Expediente - Expedir alvará / Arquivar"],
+            [("131", "Despacho")]),
+    _evento(2, date(2026, 11, 3), "INTERNO",
+            ["Mov. 129 - Certidão Expedida - COMPROVANTE DE SISBAJUD COM BUSCAS ATIVAS/DESBLOQ/ EXCLUSÃO DE CACE/CERTIDÃO"],
+            [("129", "Certidão")]),
+    _evento(3, date(2026, 10, 30), "INTERNO", ["Mov. 127 - Juntada -> Petição"], [("127", "Petição")]),
+    _evento(4, date(2026, 10, 20), "INTERNO", ["Mov. 125 - Despacho -> Mero Expediente - Sisbajud/Renajud"],
+            [("125", "Despacho -> Mero Expediente - Sisbajud/Renajud")]),
+    _evento(5, date(2026, 4, 15), "SISTEMA", ["Transitado em julgado em 15/04/2026"]),
+]
+CHK_GO = dict(CHECKLIST, cs_iniciado=True, data_inicio_cs="2026-09-23", pedido_bloqueio_autor=True,
+              data_pedido_bloqueio="2026-10-20", ordem_bloqueio_deferida=True, bloqueio_realizado=True,
+              data_bloqueio="2026-11-03")
+
+
+def test_desbloqueio_com_alvara_encerra_o_bloqueio_e_a_data_do_desbloqueio_nao_e_a_do_bloqueio():
+    capa = Capa(classe="Cumprimento de sentença", polo_passivo=["BANCO BMG S.A."])
+    with perfil.usar(BMG):
+        f = extrair(capa, EVENTOS_GO)
+        assert [d for d, _ in f.liberacoes] == [date(2026, 11, 3)]
+        assert date(2026, 11, 3) not in [d for d, _ in f.bloqueios]
+        r = classificar(dict(CHK_GO), f, date(2026, 11, 6))
+    assert r.grau == "SEM RISCO" and r.conclusao == "BLOQUEIO ENCERRADO" and etapa(r) == "ENCERRADO"
+    assert categoria(r) is None
+    assert any("03/11/2026 é a data do desbloqueio" in m for m in r.motivos)
+    assert any("desbloqueio em 03/11/2026 (alvará em 05/11/2026)" in m for m in r.motivos)
+
+
+def test_novo_pedido_depois_do_desbloqueio_reabre_e_desbloqueio_sozinho_volta_as_regras_gerais():
+    capa = Capa(classe="Cumprimento de sentença", polo_passivo=["BANCO BMG S.A."])
+    novo = [_evento(9, date(2026, 11, 10), "INTERNO", ["Penhora on-line determinada"])]
+    with perfil.usar(BMG):
+        r = classificar(dict(CHK_GO), extrair(capa, novo + EVENTOS_GO), date(2026, 11, 12))
+        assert r.ha_risco == "BLOQUEIO JÁ REALIZADO"
+        # só o desbloqueio (sem alvará, pagamento ou arquivamento): não é mais "bloqueio realizado"
+        so_desbloqueio = EVENTOS_GO[2:]
+        r2 = classificar(dict(CHK_GO), extrair(capa, so_desbloqueio), date(2026, 11, 6))
+    assert r2.ha_risco != "BLOQUEIO JÁ REALIZADO" and r2.grau == "ALTO"
+    assert any("desfeito: desbloqueio total" in m for m in r2.motivos)
+
+
+def test_desbloqueio_parcial_e_pedido_nao_desfazem_o_bloqueio():
+    capa = Capa(classe="Cumprimento de sentença", polo_passivo=["BANCO BMG S.A."])
+    base = [_evento(5, date(2026, 5, 2), "INTERNO", ["Bloqueio realizado via SISBAJUD"])]
+    with perfil.usar(BMG):
+        for mov in ("Transferência 3.413,90 desbloqueio do remanescente", "Juntada de pedido de desbloqueio",
+                    "Determino o desbloqueio do valor excedente"):
+            f = extrair(capa, [_evento(0, date(2026, 5, 20), "INTERNO", [mov])] + base)
+            assert not f.liberacoes, mov
+            r = classificar(dict(CHECKLIST, bloqueio_realizado=True, data_bloqueio="2026-05-02"), f, date(2026, 6, 1))
+            assert r.ha_risco == "BLOQUEIO JÁ REALIZADO", mov
+
+
+def test_execucao_extinta_depois_do_bloqueio_encerra():
+    capa = Capa(classe="Cumprimento de sentença", polo_passivo=["BANCO BMG S.A."])
+    eventos = [_evento(0, date(2026, 6, 1), "INTERNO", ["Extinta a execução ou o cumprimento da sentença"]),
+               _evento(1, date(2026, 5, 2), "INTERNO", ["Bloqueio realizado via SISBAJUD"])]
+    with perfil.usar(BMG):
+        r = classificar(dict(CHECKLIST, bloqueio_realizado=True, data_bloqueio="2026-05-02"),
+                        extrair(capa, eventos), date(2026, 6, 10))
+    assert r.grau == "SEM RISCO" and r.conclusao == "BLOQUEIO ENCERRADO"
+
+
 def test_decorrido_prazo_da_re_pelo_perfil():
     with perfil.usar(BMG):
         f = extrair(Capa(), [_evento(0, date(2025, 5, 1), "SISTEMA",
